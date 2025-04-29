@@ -1,0 +1,174 @@
+How to debug problems with services / How to untangle things
+============================================================
+
+A happy system
+--------------
+
+Here's an example of a system that's happy:
+
+rachel@lenny:~$ ps -AHwefl
+...
+root     26421     1  0 Jul31 ?        00:00:00   /bin/sh /usr/bin/svscanboot
+root     26423 26421  0 Jul31 ?        00:00:36     svscan /etc/service
+root     26425 26423  0 Jul31 ?        00:00:00       supervise nginx
+root     22433 26425  0 Aug03 ?        00:00:00         nginx: master process /usr/sbin/nginx -c ./nginx.conf
+www-data 17250 22433  4 Aug10 ?        08:22:01           nginx: worker process
+www-data 17251 22433  4 Aug10 ?        08:21:05           nginx: worker process
+www-data 17252 22433  4 Aug10 ?        08:16:08           nginx: worker process
+www-data 17253 22433  4 Aug10 ?        08:28:22           nginx: worker process
+root     26426 26423  0 Jul31 ?        00:00:00       supervise log
+nobody   26444 26426  0 Jul31 ?        00:00:00         multilog t ./main
+root     26429 26423  0 Jul31 ?        00:00:00       supervise tinydns
+tinydns  29041 26429  0 Jul31 ?        00:00:01         /usr/bin/tinydns
+root     26430 26423  0 Jul31 ?        00:00:00       supervise log
+dnslog   26438 26430  0 Jul31 ?        00:00:00         multilog t ./main
+root     26433 26423  0 Jul31 ?        00:00:00       supervise dnscache
+dnscache 29078 26433  0 Jul31 ?        00:12:45         /usr/bin/dnscache
+root     26434 26423  0 Jul31 ?        00:00:00       supervise log
+dnslog   26439 26434  0 Jul31 ?        00:06:07         multilog t +@* query * -@* tx * -@* rx * -@* rr * -@* cached * -@* sent * -@* nodata * * 28 * -@* stats  ./main
+root     26424 26421  0 Jul31 ?        00:00:00     readproctitle service errors: ...................................................................................
+...
+
+rachel@lenny:~$ sudo svstat  /etc/service/* /etc/service/*/log
+/etc/service/dnscache: up (pid 29078) 1628012 seconds, normally down
+/etc/service/nginx: up (pid 22433) 1394958 seconds, normally down
+/etc/service/tinydns: up (pid 29041) 1628012 seconds, normally down
+/etc/service/dnscache/log: up (pid 26439) 1628046 seconds
+/etc/service/nginx/log: up (pid 26444) 1628046 seconds
+/etc/service/tinydns/log: up (pid 26438) 1628046 seconds
+rachel@lenny:~$
+
+What about this tells me that it's happy?
+
+ - the 'supervise' processes alternate between services and log services
+   (nginx, log, tinydns, log, dnscache, log)
+ - all the supervised processes are up (each 'supervise' has a child, and it's
+   not a zombie)
+ - all the supervised processes have been up for a long time (i.e. they aren't
+   continuously starting, crashing, restarting, crashing, ...)
+ - 'readproctitle' shows no errors
+
+An unhappy system
+-----------------
+
+Here's an example of a system that's less than happy:
+
+rachel@lingling:~$ ps -AHwefl | grep -C2 supervise
+0 S rachel   15499 15497  0  80   0 -  1578 wait   20:49 pts/2    00:00:00         -bash
+0 R rachel   16779 15499  0  80   0 -   714 -      21:02 pts/2    00:00:00           ps -AHwefl
+0 S rachel   16780 15499  0  80   0 -   830 pipe_w 21:02 pts/2    00:00:00           grep --color=auto -C2 supervise
+5 S ntp      19950     1  0  80   0 -  1101 poll_s Feb06 ?        00:00:03   /usr/sbin/ntpd -p /var/run/ntpd.pid -g -u 105:115
+5 S root     24870     1  0  76  -4 -   545 poll_s Feb07 ?        00:00:00   udevd --daemon
+--
+0 S root       577     1  0  80   0 -   457 wait   07:23 ?        00:00:00   /bin/sh /usr/bin/svscanboot
+0 S root       579   577  0  80   0 -   446 hrtime 07:23 ?        00:00:00     svscan /etc/service
+0 S root       581   579  0  80   0 -   406 poll_s 07:23 ?        00:00:00       supervise my_server-fastcgi
+1 Z root     16778   581  0  80   0 -     0 exit   21:02 ?        00:00:00         [supervise] <defunct>
+0 S root       582   579  0  80   0 -   406 poll_s 07:23 ?        00:00:00       supervise log
+0 S root       585   582  0  80   0 -   408 pipe_w 07:23 ?        00:00:00         multilog t +* s1000000 n50 ./main
+0 S root       583   579  0  80   0 -   406 poll_s 07:23 ?        00:00:00       supervise blockpw
+4 S root       587   583  0  80   0 -  1485 hrtime 07:23 ?        00:00:20         /usr/bin/perl /usr/local/sbin/blockpw
+0 S root       584   579  0  80   0 -   406 poll_s 07:23 ?        00:00:00       supervise log
+4 S nobody     588   584  0  80   0 -   408 pipe_w 07:23 ?        00:00:00         multilog t ./main
+0 Z root     16775   579  0  80   0 -     0 exit   21:02 ?        00:00:00       [supervise] <defunct>
+0 Z root     16776   579  0  80   0 -     0 exit   21:02 ?        00:00:00       [supervise] <defunct>
+0 S root       580   577  0  80   0 -   403 pipe_w 07:23 ?        00:00:01     readproctitle service errors: ...er-fastcgi/supervise/status.new: file does not
+    exist?supervise: fatal: unable to start my_server-fastcgi/run: file does not
+    exist?supervise: warning: unable to open
+    my_server-fastcgi/supervise/status.new: file does not exist?supervise: warning:
+    unable to open my_server-fastcgi/supervise/status.new: file does not
+    exist?supervise: fatal: unable to start my_server-fastcgi/run: file does not
+    exist?
+
+rachel@lingling:~$ sudo svstat /etc/service/*
+/etc/service/blockpw: up (pid 587) 49180 seconds
+/etc/service/my_server-fastcgi: unable to open supervise/ok: file does not exist
+rachel@lingling:~$
+
+
+
+How do I know that it's not happy?
+----------------------------------
+
+ * Several zombie ("<defunct>") processes
+ * Error messages in the "readproctitle" command string
+
+It's useful to use "lsof" to see what supervise processes are running and where:
+
+  rachel@lingling:~$ sudo lsof -c supervise -a -d cwd
+  COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF    NODE NAME
+  supervise   581 root  cwd    DIR    9,0        0 1573741 /etc/service/my_server-fastcgi (deleted)
+  supervise   582 root  cwd    DIR    9,0     4096 1573763 /usr/local/my_server-fastcgi/log
+  supervise   583 root  cwd    DIR    9,0     4096 2626208 /usr/local/blockpw
+  supervise   584 root  cwd    DIR    9,0     4096 2626341 /usr/local/blockpw/log
+  supervise 17171 root  cwd    DIR    9,0     4096 2626352 /usr/local/my_server-fastcgi
+  supervise 17331 root  cwd    DIR    9,0     4096 1573763 /usr/local/my_server-fastcgi/log
+
+The output above is also a system that's not happy - there are two supervise
+processes in the same directory (/usr/local/my_server-fastcgi/log), and
+there's one running in a deleted directory.  Both of these things are bad.
+
+
+
+How to reset things
+-------------------
+
+Assuming you're OK with taking down all your services in order to debug this,
+you can reset things as follows.
+
+First, empty out your service directory (which should only contain symbolic
+links, so you're not destroying much).  You might want to make a note of what
+links are in place before you delete them:
+
+  cd /etc/service # or wherever your svscan directory is
+  ls -l # take note of the output of this
+  rm *
+
+This will stop svscan from trying to start up any new services, or any
+services whose "supervise" processes disappear.
+
+Next, stop all your services.  To do this you should "cd" to each service
+directory in turn (you can't use the symlinks now, because they're gone),
+and use "svc" to stop the both the service and supervise:
+
+  cd /path/to/myservice
+  svc -dx .
+  svc -dx ./log
+
+  # repeat for each service
+
+Check that all your processes are indeed stopped, and kill off any that are
+still running that shouldn't be.  (How to do this depends on your setup, of
+course).
+
+At this point you may still have "supervise" processes running.  You should
+stop them all now:
+
+  pkill supervise
+
+Now to restart svscan / svscanboot / readproctitle.  How to do that depends on
+how you (or your distribution) installed daemontools.  Ubuntu controls svscan
+using "upstart", under the service name "svscan", so you can just
+
+  restart svscan
+
+Or, if you installed daemontools from source, you might have to kill them by
+hand, doing "svscanboot" last:
+
+  pkill svscan
+  pkill readproctitle
+  pkill svscanboot
+
+As soon as you kill them, the system (e.g. init) should restart them for you.
+
+At this point you should have a nice clean empty set of services:
+
+root     17357     1  0 21:10 ?        00:00:00   /bin/sh /usr/bin/svscanboot
+root     17359 17357  0 21:10 ?        00:00:00     svscan /etc/service
+root     17360 17357  0 21:10 ?        00:00:00     readproctitle service errors: ....................................................................................
+
+So all that's left to remain is to reinstate the service symlinks that you
+removed earlier:
+
+  ln -s /path/to/myservice /etc/service/
+  ln -s /path/to/funkysvc /etc/service/

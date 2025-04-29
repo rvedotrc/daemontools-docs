@@ -1,0 +1,410 @@
+An introduction to daemontools
+==============================
+
+daemontools is a collection of small programs designed to help run other
+programs as services.  In particular this document mostly concentrates on
+"supervise" and its friends, which bring a service up and restart it if it
+terminates unexpectedly.
+
+daemontools often comes with no man pages, but you can download and install
+man pages separately, or you can find them on the web.
+
+This document doesn't tell you what the individual programs /do/ - it's not a
+reference manual.  If you want to know that, refer to the original
+documentation (http://cr.yp.to/daemontools.html), or go find the man pages.
+Rather, this document attempts to explain how to make best use of daemontools
+in practice.
+
+Installing and starting daemontools
+===================================
+
+On a recent Ubuntu:
+
+  sudo aptitude install daemontools daemontools-run
+  sudo start svscan
+
+Installing and starting daemontools for other systems is not covered here.
+
+"supervise" and friends
+=======================
+
+Here's what a system looks like when it's already been set up with a few
+services:
+
+bigpanda:~# ps -AHwefl
+F S UID        PID  PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY      TIME       CMD
+...
+0 S root      2667     1  0  80   0 -   422 -      07:07 tty6     00:00:00   /sbin/getty 38400 tty6
+4 S root      2668     1  0  80   0 -   685 -      07:07 ?        00:00:00   /bin/sh /usr/bin/svscanboot
+0 S root      2681  2668  0  80   0 -   426 -      07:07 ?        00:00:00     svscan /etc/service
+4 S root      2685  2681  0  80   0 -   386 -      07:07 ?        00:00:00       supervise dnscache
+4 S 105       2904  2685  0  80   0 -   744 -      07:07 ?        00:00:00         /usr/bin/dnscache
+0 S root      2686  2681  0  80   0 -   386 -      07:07 ?        00:00:00       supervise log
+4 S Gdnslog   2691  2686  0  80   0 -   388 -      07:07 ?        00:00:00         multilog t ./main
+4 S root      2687  2681  0  80   0 -   386 -      07:07 ?        00:00:00       supervise forge-irc
+0 S root      2688  2681  0  80   0 -   386 -      07:07 ?        00:00:00       supervise battery-monitor
+0 S root      2690  2688  0  80   0 -  1060 -      07:07 ?        00:00:00         /usr/bin/perl /etc/sv/battery-monitor/monitor
+0 S root      2689  2681  0  80   0 -   386 -      07:07 ?        00:00:00       supervise log
+0 S root      2694  2689  0  80   0 -   388 -      07:07 ?        00:00:00         multilog t ./main
+0 S root      2682  2668  0  80   0 -   383 -      07:07 ?        00:00:00     readproctitle service errors: ................................
+1 S rachel    2765     1  0  80   0 -   752 -      07:07 ?        00:00:00   /usr/bin/dbus-launch --exit-with-session x-session-manager
+...
+
+In the example above we have three services, "dnscache", "forge-irc" and "battery-monitor";
+dnscache and battery-monitor also have a "log" service each, but forge-irc does not.
+forge-irc is down; the others are up.
+
+The svscan directory
+--------------------
+
+"svscan", which we'll discuss in more detail later, monitors a particular
+directory for the presence of (in practice) symlinks to service directories.
+
+The location of this directory ("the svscan directory") varies from system to
+system:
+
+ * daemontools built from source uses /service
+ * some Debian-based systems use /etc/service
+ * some Debian-based systems use /var/lib/svscan
+
+The rest of this page assumes "/etc/service", but you may need to adjust that
+to suit your system.
+
+Cookbook: Controlling services
+------------------------------
+
+With these services set up we can interrogate them using "svstat" and control
+them with "svc".
+
+ * "svstat [DIR ...]" shows the status of the supervised service running in
+   each DIR.  For example,
+
+    bigpanda:~# svstat /etc/dnscache
+    /etc/dnscache: up (pid 2904) 2127 seconds
+
+    bigpanda:~# cd /etc/dnscache
+    bigpanda:/etc/dnscache# svstat . log
+    .: up (pid 2904) 2141 seconds
+    log: up (pid 2691) 2174 seconds
+
+ * "svc -FLAGS [DIR ...]" controls the specified services according to FLAGS.
+   The most commonly used flags are "-u" (bring service up), "-d" (bring
+   service down), and "-t" (send SIGTERM, i.e. restart).
+
+    bigpanda:~# svc -t /etc/dnscache
+
+    bigpanda:~# cd /etc/dnscache
+    bigpanda:~# svc -t . log
+
+Cookbook: adding a service
+--------------------------
+
+Generally, you'll want to do all of this as the same user that "svscan" runs
+as, which is usually root.
+
+Choose a name for your service, as it will appear in the svscan directory.
+
+  Example: "showdate"
+
+Choose a location for your service directory - NOT in the svscan directory.
+Depending on your distribution, there may be a "standard" place where these
+services go, which you may want to follow.  daemontools doesn't care, though.
+
+  Example: /etc/sv/showdate
+
+Create the service directory.  Create an executable called "run" inside the
+service directory.  When "./run" is executed, it should run the service,
+without "backgrounding" itself, running until it receives SIGTERM.
+
+  Example:
+    mkdir /etc/sv/showdate
+    cd /etc/sv/showdate
+
+    cat <<EOF >./run
+    #!/bin/bash
+    while true ; do date ; sleep 5 ; done
+    EOF
+
+    chmod +x ./run
+
+At this point it's a good idea to test the service:
+
+    ./run
+
+(in this case you'd press CTRL-C when you're happy that it's working).
+
+The test is not completely accurate, because the environment (environment
+variables, file descriptors, etc) of your shell won't be the same as that
+provided by svscan / supervise.  But it's usually a useful test for catching
+really obvious errors.
+
+At this point, you need to decide whether or not you want a logging service
+too.  A logging service, if present, is connected to the main service via a
+pipe; the standard output of the main service is fed to the standard input of
+the logging service.  If you're not sure, it's best to have a logging service.
+
+To create a logging service, just create a directory called "log" which itself
+includes a "run" executable.  Here's an example logging service which uses
+"multilog" (which we'll talk about more later):
+
+  Example:
+    mkdir log
+    cd log
+
+    cat <<EOF >./run
+    #!/bin/sh
+    mkdir -p ./main
+    exec multilog t ./main
+    EOF
+
+    chmod +x ./run
+
+Again at this point you can test the logging service:
+
+    echo test | ./run
+
+If you used the multilog example above, you can then check the log file that
+it produced as follows:
+
+    tai64nlocal < ./main/current
+
+which should show a timestamp followed by the "test" that you asked it to log.
+
+    cd .. # to go back up to the service directory
+
+If all's well then you can now symlink your service directory in to the svscan
+directory, e.g.:
+
+    ln -s $PWD /etc/service/
+
+Wait at least 5 seconds (svscan only checks for new services every 5 seconds)
+before checking that your service is up:
+
+    svstat . log
+
+which should show something like:
+
+    .: up (pid 2904) 2 seconds
+    log: up (pid 2691) 2 seconds
+
+It's now a good idea to check that your service is up, and staying up - not
+repeatedly crashing and restarting.
+
+If you used the multilog logging service above, check the logs using:
+
+    tail -F log/main/current | tai64nlocal
+
+It's also a good idea to "wait a bit longer" (e.g. a minute), then run
+"svstat" again:
+
+    .: up (pid 2904) 87 seconds
+    log: up (pid 2691) 87 seconds
+
+If the uptime keeps getting reset to 0 (i.e. every time you look it's only
+been up a few seconds), then your service is terminating unexpectedly, maybe
+because it's crashing.  If that happens you might want to "svc -d ." (stop the
+service), fix the problem, then "svc -u ." (start it again).
+
+Cookbook: removing a service
+----------------------------
+
+ * Remove the symlink from the svscan directory
+
+    rm /etc/service/showdate
+
+ * Stop the service, *and supervise*
+
+    cd /etc/sv/showdate
+    svc -dx .
+
+Unfortunately "svc -dx" doesn't have the facility to wait for the service &
+supervise to exit, so to be thorough, you should do this by hand, using
+"svok" (e.g. "while svok . ; do sleep 1 ; done").
+
+ * Stop the logging service, *and supervise*
+
+    svc -dx ./log
+
+ * "rm -rf" the service directory (if required.  You might want to skip this,
+   e.g. if you kept the logs under the service directory, and you want to keep
+   the logs).
+
+    cd
+    rm -rf /etc/sv/showdate
+
+What kinds of services can I control with supervise?
+----------------------------------------------------
+
+Anything which:
+
+ * doesn't need a tty
+ * doesn't fork into the background
+ * shuts down on SIGTERM
+
+If it also happens to respond to SIGHUP by reloading its configuration, so
+much the better (only because daemontools makes it easy to send SIGHUP).
+
+What is supervise good at?  What's it not good at?
+--------------------------------------------------
+
+It's good at bringing up some fixed set of services, probably at boot time,
+and keeping the services up (i.e. restarting them if they terminate
+unexpectedly).
+
+It makes it easy to turn some program that runs into the foreground into a
+background service, and it's easy to control that service.
+
+It has no understanding at all of dependencies between services (e.g. only
+bring up Y and Z once X is up).
+
+If your service crashes, it's no good at doing anything other than restarting
+it.  For example, it doesn't send alerts, and it doesn't give up restarting it
+after "too many" restarts.  If your service crashes quickly on restart, it
+could be restarting tens of thousands of times a day.
+
+Why should the svscan directory use symlinks, not sub-directories?
+------------------------------------------------------------------
+
+If you use sub-directories and not symlinks, then:
+
+ * While you're still setting up the service directory (e.g. still creating /
+   tweaking the run file), svscan is already trying to start the service.
+
+ * When you come to remove the service, there's a race condition between
+   stopping "supervise", removing the service directory, and svscan
+   restarting "supervise".
+
+Both problems are avoided by using symlinks.
+
+Dos and Don'ts
+--------------
+
+ * If your "run" files are shell scripts that (for example) end up running
+   some other executable, do ensure that the shell script 'exec's the last
+   executable instead of running it (as a child, and waiting for it to
+   terminate).  If you don't, then when you try to take the service down ("svc
+   -d"), you'll be sending SIGTERM to the shell script, not to the other
+   executable.
+
+ * Generally, do "exec 2>&1" in your main service run script, so that stderr
+   gets logged in the same place as stdout.  Otherwise stderr ends up in the
+   "readproctitle" output, which is generally not helpful.
+
+ * If you want to run as non-root and your main program doesn't provide a way
+   to change uid/gid, do use "setuidgid".  e.g. the last line of your run
+   script might look like:
+
+    exec setuidgid myuser myprogram [args ...]
+
+ * Do include something like "echo starting" at the top of your run script; it
+   makes it easy to see where each run of your service starts, and easy to answer
+   questions such as "how often does it usually restart?".
+
+ * If the program you want to run as a supervised service has a "daemon" mode
+   (i.e. where it forks into the background), turn that off.  For example, if
+   you were using supervise to control the DNS server BIND, you'd pass the
+   "-f" option to /usr/sbin/named (from the "named" man page, "Run the server
+   in the foreground (i.e. do not daemonize)").
+
+ * Don't worry about creating the "supervise" directories.  "supervise" takes
+   care of that itself.
+
+Summary
+-------
+
+ * A service is just a directory with an executable called "run".
+ * Services often come in pairs; the main service and a logging service.  The
+   logging service is in the main service's "log" directory, and the stdout of
+   the main service is connected to the stdin of the logging service.
+ * The entries in the svscan directory (whereever that is) should be symlinks
+   to service directories, not service directories themselves.
+
+multilog and tai64nlocal
+========================
+
+"multilog" can perform a variety of types of logging, but typically it
+performs simple fixed-size log rotation with timestamping of each line.
+
+For example:
+
+  multilog t s1000000 n10 ./main
+
+adds a timestamp to the start of each line, then logs to the "./main"
+directory, with up to 10 files of 1000000 bytes each.
+
+The timestamps look like this:
+
+  @400000004d52960a0ebe121c test
+
+To decode them, pipe through "tai64nlocal".
+
+A useful command to tail the logs and decode timestamps is:
+
+  tail -F log/main/current | tai64nlocal
+
+mutlilog can in fact do lots more than that, including sending each input line
+to any number of output logs, perhaps based on pattern-matching the input line
+(e.g. one log for everything, another log only for lines starting with ERROR).
+
+envdir, setuidgid and softlimit
+===============================
+
+These programs can be useful helpers for service "run" scripts to use.
+
+"envdir" sets environment variables according to files found in a given
+directory:
+
+  mkdir env
+  echo Fido > env/NAME
+  echo dog > env/ANIMAL
+  envdir ./env bash -c 'echo My $ANIMAL is called $NAME'
+
+"setuidgid" changes uid/gid before running some other program:
+
+  # id
+  uid=0(root) gid=0(root) groups=0(root)
+  # setuidgid rachel id
+  uid=1000(rachel) gid=1000(rachel) groups=1000(rachel)
+
+"softlimit" applies limits on things such as memory limits, number of open
+file descriptors, etc, before running some other program.  For example, to not
+allow leakyprogram to use more than 50000000 bytes of memory,
+
+  softlimit -m 50000000 leakyprogram
+
+Stitching it all together
+=========================
+
+Here's an example of a service directory used to run Apache ActiveMQ.
+
+We have an envdir, used to set up some configuration items:
+
+  [root@radio-xen-amidev333 activemq-service]# grep ^ env/*
+  env/ACTIVEMQ_BASE:/usr/local/apache-activemq-5.2
+  env/JAVA_HOME:/usr/java/jdk1.5.0_15
+  env/USER:activemq
+  [root@radio-xen-amidev333 activemq-service]#
+
+We have a run script, which makes use of envdir, setuidgid and softlimit:
+
+  [root@radio-xen-amidev333 activemq-service]# cat run
+  #!/bin/sh
+  echo starting
+  exec 2>&1 \
+          envdir ./env \
+          sh -c '
+                  set -e
+                  cd "$ACTIVEMQ_BASE"
+                  exec setuidgid "$USER" \
+                          softlimit -m 8000000000 \
+                          ./bin/activemq
+          '
+  [root@radio-xen-amidev333 activemq-service]#
+
+We have a log run script, using multilog:
+
+  [root@radio-xen-amidev333 activemq-service]# cat log/run
+  #!/bin/sh
+  exec setuidgid actmqlog \
+          multilog t s1000000 n30 ./main
+  [root@radio-xen-amidev333 activemq-service]#
